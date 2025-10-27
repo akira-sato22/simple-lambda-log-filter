@@ -1,0 +1,4 @@
+filter_pattern,custom_message,exception_pattern
+ERROR|CRITICAL,重大なエラーが発生しました,Database
+WARNING|WARN,警告が発生しました,
+

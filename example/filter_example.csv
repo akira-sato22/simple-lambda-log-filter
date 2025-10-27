@@ -1,0 +1,6 @@
+filter_pattern,custom_message,exception_pattern
+ERROR|CRITICAL,重大なエラーが発生しました,Database
+WARNING|WARN,警告が発生しました,
+^Timeout.*occurred$,タイムアウトが発生しました,
+.*Exception.*,例外が発生しました,SystemExit
+
