@@ -156,6 +156,95 @@ cdk deploy LogFilterStack
 - `SnsTopicArn`: 通知先の SNS トピック ARN
 - `LambdaFunctionName`: フィルタリング Lambda 関数名
 
+## 動作確認
+
+デプロイ後、AWS CLI を使用してテストログを送信し、フィルタリングと通知が正常に動作するか確認できます。
+
+### 1. ログストリームを作成
+
+```bash
+aws logs create-log-stream \
+  --log-group-name /aws/ec2/applogtest/app1 \
+  --log-stream-name test-stream
+```
+
+### 2. テストログを送信
+
+#### 単一のログを送信
+
+```bash
+# エラーログを送信（フィルターに合致）
+aws logs put-log-events \
+  --log-group-name /aws/ec2/applogtest/app1 \
+  --log-stream-name test-stream \
+  --log-events timestamp=$(date +%s)000,message="ERROR: Database connection failed"
+
+# 警告ログを送信（フィルターに合致）
+aws logs put-log-events \
+  --log-group-name /aws/ec2/applogtest/app1 \
+  --log-stream-name test-stream \
+  --log-events timestamp=$(date +%s)000,message="WARNING: High memory usage detected"
+
+# 通常ログを送信（フィルターに合致しない）
+aws logs put-log-events \
+  --log-group-name /aws/ec2/applogtest/app1 \
+  --log-stream-name test-stream \
+  --log-events timestamp=$(date +%s)000,message="INFO: Application started successfully"
+```
+
+#### 複数のログを一度に送信
+
+```bash
+aws logs put-log-events \
+  --log-group-name /aws/ec2/applogtest/app1 \
+  --log-stream-name test-stream \
+  --log-events \
+    timestamp=$(date +%s)000,message="INFO: Starting application" \
+    timestamp=$(($(date +%s) + 1))000,message="ERROR: Failed to connect to database" \
+    timestamp=$(($(date +%s) + 2))000,message="CRITICAL: Service unavailable" \
+    timestamp=$(($(date +%s) + 3))000,message="WARNING: Connection timeout"
+```
+
+#### 大量のログを送信（ループパターン）
+
+```bash
+# 100件のログを送信するスクリプト
+for i in {1..100}; do
+  # タイムスタンプを生成（ミリ秒単位）
+  timestamp=$(($(date +%s) * 1000 + i))
+  
+  # ログレベルをランダムに選択
+  case $((i % 5)) in
+    0) level="ERROR"; message="Database error occurred #$i" ;;
+    1) level="WARNING"; message="Memory usage high #$i" ;;
+    2) level="CRITICAL"; message="Service failure #$i" ;;
+    3) level="INFO"; message="Processing request #$i" ;;
+    4) level="DEBUG"; message="Debug info #$i" ;;
+  esac
+  
+  aws logs put-log-events \
+    --log-group-name /aws/ec2/applogtest/app1 \
+    --log-stream-name test-stream \
+    --log-events timestamp=$timestamp,message="$level: $message"
+  
+  # APIレート制限を避けるため少し待機
+  sleep 0.1
+done
+```
+
+### 3. Lambda 関数のログを確認
+
+```bash
+# デプロイ時に出力された Lambda 関数名を使用
+aws logs tail /aws/lambda/LogFilterStack-LogFilterFilterFunctionXXXXXXXX --follow
+```
+
+### ヒント
+
+- `timestamp` はミリ秒単位の Unix タイムスタンプです
+- ログイベントはタイムスタンプの昇順で送信する必要があります
+- フィルターに合致したログ（ERROR、WARNING、CRITICAL）の場合、SNS 通知が送信されます
+
 ## カスタマイズ
 
 ### Lambda 関数のタイムアウトやメモリを変更
