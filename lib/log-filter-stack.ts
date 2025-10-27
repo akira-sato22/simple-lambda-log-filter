@@ -19,6 +19,8 @@ export class LogFilterStack extends cdk.Stack {
     const logFilter = new LogFilterConstruct(this, "LogFilter", {
       logGroup: logGroup,
       filterCsvPath: path.join(__dirname, "../example/filter_example.csv"),
+      // 既存のSNSトピックを使用する場合は以下のコメントを解除してください
+      //   snsTopic: existingTopic,
       alarmSubject: "ログ分類のテスト",
     });
 
