@@ -5,9 +5,14 @@ import re
 import os
 import csv
 import boto3
-import time
+import logging
 from botocore.exceptions import ClientError
 from io import StringIO
+
+# ロギング設定
+logger = logging.getLogger()
+log_level = os.environ.get("LOG_LEVEL", "INFO")
+logger.setLevel(getattr(logging, log_level.upper(), logging.INFO))
 
 # グローバル変数
 ENCODING = "utf-8"
@@ -40,9 +45,12 @@ def load_csv_filters(csv_path):
                         row.get("exception_pattern", ""),
                     )
                 )
+        logger.info(
+            f"CSVファイルから {len(patterns)} 件のフィルターパターンを読み込みました"
+        )
         return patterns
     except Exception as e:
-        print(f"CSVファイルの読み込みに失敗しました: {e}")
+        logger.error(f"CSVファイルの読み込みに失敗しました: {e}", exc_info=True)
         raise
 
 
@@ -76,10 +84,10 @@ def publish_sns(log_group, custom_message, data_json, log_event):
             Subject=f"{os.environ['ALARM_SUBJECT']} ソースログ：{data_json['logGroup']}",
         )
 
-        print(f"メッセージを送信しました。MessageId: {response['MessageId']}")
+        logger.info(f"メッセージを送信しました。MessageId: {response['MessageId']}")
         return response
     except Exception as e:
-        print(f"SNS送信中にエラーが発生しました: {e}")
+        logger.error(f"SNS送信中にエラーが発生しました: {e}", exc_info=True)
         raise
 
 
@@ -100,54 +108,76 @@ def lambda_handler(event, context):
     Returns:
         dict: 実行結果を示すレスポンス
     """
-    print("Loading function")
+    logger.info("Lambda関数を開始します")
 
-    # パフォーマンス計測開始
-    start_time = time.time()
+    try:
+        # 環境変数から設定を読み込み
+        csv_file_path = os.environ.get("CSV_FILE_PATH", "/var/task/filter.csv")
+        logger.debug(f"CSVファイルパス: {csv_file_path}")
 
-    # 環境変数から設定を読み込み
-    csv_file_path = os.environ.get("CSV_FILE_PATH", "/var/task/filter.csv")
+        # CSVファイルからフィルター設定を読み込み
+        filter_patterns = load_csv_filters(csv_file_path)
 
-    # CSVファイルからフィルター設定を読み込み
-    filter_patterns = load_csv_filters(csv_file_path)
+        # CloudWatch Logsのイベントデータを解凍・デコード
+        data = zlib.decompress(
+            base64.b64decode(event["awslogs"]["data"]), 16 + zlib.MAX_WBITS
+        )
+        data_json = json.loads(data)
 
-    # CloudWatch Logsのイベントデータを解凍・デコード
-    data = zlib.decompress(
-        base64.b64decode(event["awslogs"]["data"]), 16 + zlib.MAX_WBITS
-    )
-    data_json = json.loads(data)
+        log_events = data_json["logEvents"]
+        log_group = data_json["logGroup"]
 
-    log_events = data_json["logEvents"]
-    log_group = data_json["logGroup"]
+        logger.info(f"ログイベント数: {len(log_events)}, ログソース: {log_group}")
 
-    # 各ログイベントに対してフィルタリングを実行
-    for log_event in log_events:
-        log_message = log_event["message"]
-        match_found = False
+        # 各ログイベントに対してフィルタリングを実行
+        matched_count = 0
+        excluded_count = 0
 
-        # 定義された全フィルターパターンでチェック
-        for pattern, custom_message, exception_pattern in filter_patterns:
-            # パターンに一致しない場合はスキップ
-            if not re.search(pattern, log_message):
-                continue
+        for log_event in log_events:
+            log_message = log_event["message"]
+            match_found = False
 
-            # 除外パターンに一致する場合は処理をスキップ
-            if exception_pattern and re.search(exception_pattern, log_message):
-                print(f"Excluded Log: {log_message}")
+            # 定義された全フィルターパターンでチェック
+            for pattern, custom_message, exception_pattern in filter_patterns:
+                # パターンに一致しない場合はスキップ
+                if not re.search(pattern, log_message):
+                    continue
+
+                # 除外パターンに一致する場合は処理をスキップ
+                if exception_pattern and re.search(exception_pattern, log_message):
+                    logger.info(f"除外パターンに一致: {log_message[:100]}...")
+                    excluded_count += 1
+                    break
+
+                logger.info(
+                    f"フィルターに一致: パターン='{pattern}', メッセージ='{log_message[:100]}...'"
+                )
+                match_found = True
+                matched_count += 1
+
+                try:
+                    # マッチしたログメッセージをSNSに送信
+                    publish_sns(log_group, custom_message, data_json, log_event)
+                except Exception as e:
+                    logger.error(f"SNS送信中にエラーが発生しました: {e}", exc_info=True)
                 break
 
-            print(f"Filtered Log: {log_message}")
-            match_found = True
-            try:
-                # マッチしたログメッセージをSNSに送信
-                publish_sns(log_group, custom_message, data_json, log_event)
-            except Exception as e:
-                print(f"SNS送信中にエラーが発生しました: {e}")
-            break
+        logger.info(f"処理完了 - マッチ: {matched_count}件, 除外: {excluded_count}件")
 
-    # パフォーマンス計測終了と実行時間の出力
-    end_time = time.time()
-    execution_time = (end_time - start_time) * 1000
-    print(f"Execution time: {execution_time:.2f} ms")
+        return {
+            "statusCode": 200,
+            "body": json.dumps(
+                {
+                    "message": "ログフィルタリングとSNS送信が完了しました",
+                    "matched": matched_count,
+                    "excluded": excluded_count,
+                }
+            ),
+        }
 
-    return {"statusCode": 200, "body": "ログフィルタリングとSNS送信が完了しました"}
+    except Exception as e:
+        logger.error(f"Lambda関数の実行中にエラーが発生しました: {e}", exc_info=True)
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"message": "エラーが発生しました", "error": str(e)}),
+        }
